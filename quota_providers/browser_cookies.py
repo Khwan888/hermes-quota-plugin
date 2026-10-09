@@ -294,17 +294,30 @@ _LINUX_SECRET_LOOKUPS: dict[str, tuple[tuple[str, str], ...]] = {
 _LINUX_FALLBACK_PASSWORD = "peanuts"
 
 
-def _linux_keyring_password(app: str) -> Optional[str]:
+def _subprocess_timeout(deadline, cap: float = 15.0) -> float:
+    """Timeout for the next keyring subprocess. ``deadline`` is an optional
+    ``quota_providers.base.Deadline``; without one the historic 15s applies.
+    Raises ``ChromeCookieError("timeout")`` once the shared budget is spent."""
+    if deadline is None:
+        return cap
+    timeout = deadline.slice(cap)
+    if timeout <= 0:
+        raise ChromeCookieError("timeout")
+    return timeout
+
+
+def _linux_keyring_password(app: str, deadline=None) -> Optional[str]:
     if not shutil.which("secret-tool"):
         return None
     for attribute, value in _LINUX_SECRET_LOOKUPS.get(app, ()):
+        timeout = _subprocess_timeout(deadline)
         try:
             completed = subprocess.run(
                 ["secret-tool", "lookup", attribute, value],
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=timeout,
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
@@ -315,15 +328,16 @@ def _linux_keyring_password(app: str) -> Optional[str]:
     return None
 
 
-def _chrome_safe_storage_password(app: str = "chrome") -> Optional[str]:
+def _chrome_safe_storage_password(app: str = "chrome", deadline=None) -> Optional[str]:
     """Safe Storage password for one browser, or None when unavailable."""
     if sys.platform.startswith("linux"):
-        return _linux_keyring_password(app)
+        return _linux_keyring_password(app, deadline)
     if sys.platform != "darwin":
         return None
     if app != "chrome":
         # Only Google Chrome's Keychain item is read on macOS.
         return None
+    timeout = _subprocess_timeout(deadline)
     try:
         completed = subprocess.run(
             [
@@ -338,7 +352,7 @@ def _chrome_safe_storage_password(app: str = "chrome") -> Optional[str]:
             check=False,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -373,10 +387,11 @@ def _derive_chrome_key(password: str) -> bytes:
     ).derive(password.encode("utf-8"))
 
 
-def _chrome_aes_keys(app: str = "chrome") -> list[bytes]:
+def _chrome_aes_keys(app: str = "chrome", deadline=None) -> list[bytes]:
     """Candidate AES keys for one browser's cookie DB, best guess first."""
     keys: list[bytes] = []
-    password = _chrome_safe_storage_password(app)
+    password = (_chrome_safe_storage_password(app) if deadline is None
+                else _chrome_safe_storage_password(app, deadline=deadline))
     if password:
         keys.append(_derive_chrome_key(password))
     if sys.platform.startswith("linux"):
@@ -470,11 +485,13 @@ def _chrome_app_for_path(path: Path) -> str:
     return "chrome"
 
 
-def load_chrome_grok_cookies() -> Optional[str]:
+def load_chrome_grok_cookies(deadline=None) -> Optional[str]:
     """Cookie header for grok.com from a local browser profile, or None.
 
     macOS reads the Keychain, Linux the login keyring (secret-tool); Windows is
-    unsupported (DPAPI).
+    unsupported (DPAPI). With a ``Deadline``, keyring subprocess timeouts are
+    sliced from it and ``ChromeCookieError("timeout")`` is raised once it is
+    spent, so cookie acquisition cannot outlive the caller's budget.
     """
     if sys.platform != "darwin" and not sys.platform.startswith("linux"):
         return None
@@ -493,6 +510,8 @@ def load_chrome_grok_cookies() -> Optional[str]:
     decrypt_reason: Optional[str] = None
 
     for source in sources:
+        if deadline is not None and deadline.expired():
+            raise ChromeCookieError("timeout")
         try:
             with _copied_sqlite(source) as conn:
                 rows = conn.execute(
@@ -528,7 +547,8 @@ def load_chrome_grok_cookies() -> Optional[str]:
             if keys is None:
                 # Resolved lazily: a profile with no grok cookies must not fail
                 # just because no keyring secret is available.
-                keys = _chrome_aes_keys(app)
+                keys = (_chrome_aes_keys(app) if deadline is None
+                        else _chrome_aes_keys(app, deadline=deadline))
                 keys_by_app[app] = keys
             value: Optional[str] = None
             for candidate in keys:

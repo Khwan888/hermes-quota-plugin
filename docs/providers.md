@@ -175,9 +175,9 @@ endpoint the CLI uses for its own usage view (undocumented, so it may change).
 The card shows the weekly credit meter and the per-product legend
 (e.g. `Grok Build`). The plugin never sends the refresh token and never writes
 `auth.json`. The access token is short-lived; when it has expired the plugin
-does not renew it. The card then shows `reauth-required` unless the browser
-cookie fallback succeeds. Running the Grok CLI usually renews the token; if it
-does not, run `grok login`.
+does not renew it; the browser cookie fallback runs instead. If no cookie
+session is found, `reauth-required` is shown; browser-access or cookie-request
+failures may report another reason. Run `grok login` to restore CLI access.
 
 If there is no CLI login, or the CLI request fails, the browser cookie path runs.
 Cookie sources, in order:

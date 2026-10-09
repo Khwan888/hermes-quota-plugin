@@ -55,7 +55,7 @@ def _write_private_debug(path: str, raw: bytes) -> None:
         raise
 
 
-def _load_cookies() -> Optional[str]:
+def _load_cookies(deadline: Optional[Deadline] = None) -> Optional[str]:
     try:
         with open(_SESSION_PATH, "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -72,7 +72,11 @@ def _load_cookies() -> Optional[str]:
     firefox = load_firefox_grok_cookies()
     if firefox:
         return firefox
-    return load_chrome_grok_cookies()
+    if deadline is None:
+        return load_chrome_grok_cookies()
+    if deadline.expired():
+        raise ChromeCookieError("timeout")
+    return load_chrome_grok_cookies(deadline=deadline)
 
 
 def _parse_grok_protobuf(raw: bytes) -> Optional[QuotaResult]:
@@ -307,9 +311,9 @@ def _is_public_scope(scope: object, entry: dict) -> bool:
     issuer field, when present, must agree with it."""
     if not (isinstance(scope, str) and scope.startswith(_CLI_PUBLIC_ISSUER + "::")):
         return False
-    issuer = entry.get("oidc_issuer")
-    if issuer is None:
+    if "oidc_issuer" not in entry:
         return True
+    issuer = entry["oidc_issuer"]
     return isinstance(issuer, str) and issuer.strip().rstrip("/") == _CLI_PUBLIC_ISSUER
 
 
@@ -324,7 +328,7 @@ def _load_grok_cli_token() -> tuple[Optional[str], Optional[str]]:
     try:
         with open(_grok_cli_auth_path(), "r", encoding="utf-8") as fh:
             data = json.load(fh)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None, "no-credentials"
     if not isinstance(data, dict):
         return None, "no-credentials"
@@ -435,7 +439,7 @@ def _fetch_grok_cli(deadline: Deadline) -> Optional[QuotaResult]:
         return build_unavailable("grok", f"fetch-error:{type(e).__name__}")
     try:
         data = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         return build_unavailable("grok", "bad-json")
     try:
         parsed = _parse_cli_billing(data)
@@ -452,8 +456,10 @@ def fetch_grok_quota(deadline: Optional[Deadline] = None) -> QuotaResult:
     if deadline.remaining() <= 0:
         return cli if cli is not None else build_unavailable("grok", "timeout")
     try:
-        cookies = _load_cookies()
+        cookies = _load_cookies(deadline)
     except ChromeCookieError as exc:
+        if exc.reason == "timeout" and cli is not None:
+            return cli
         return build_unavailable("grok", exc.reason)
     if not cookies:
         return cli if cli is not None else build_unavailable("grok", "no-session-cookies")

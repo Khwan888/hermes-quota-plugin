@@ -208,6 +208,67 @@ class FetchTests(_Env):
             res = grok.fetch_grok_quota()
         self.assertEqual((res.unavailable_reason, res.details), (None, ["cookie"]))
 
+    def test_deeply_nested_json_falls_back(self):
+        deep = b"[" * 100000 + b"]" * 100000
+        with open(os.path.join(self.tmp, "auth.json"), "wb") as fh:
+            fh.write(deep)
+        self.assertEqual(grok._load_grok_cli_token(), (None, "no-credentials"))
+        _auth(self.tmp, "2999-01-01T00:00:00Z")
+        with mock.patch.object(grok, "urlopen_no_redirect", _ok(deep)), \
+                mock.patch.object(grok, "_load_cookies", return_value=None):
+            self.assertEqual(grok.fetch_grok_quota().unavailable_reason, "bad-json")
+
+    def test_cli_then_keyring_stays_inside_budget(self):
+        """The CLI request burns 15s of the 18s budget. The keyring lookup
+        reached through the cookie fallback gets the remaining 3s, not a fresh
+        15s, and the next lookup is never started."""
+        from quota_providers import browser_cookies as bc
+        _auth(self.tmp, "2999-01-01T00:00:00Z")
+        now = [0.0]
+        deadline = Deadline(grok._FETCH_BUDGET_S, clock=lambda: now[0])
+        timeouts = []
+
+        def _slow_cli(req, timeout=None):
+            now[0] += 15.0
+            raise urllib.error.HTTPError(req.full_url, 500, "x", {}, None)
+
+        def _run(cmd, timeout=None, **kw):
+            timeouts.append(timeout)
+            now[0] += timeout
+            raise bc.subprocess.TimeoutExpired(cmd, timeout)
+
+        def _chrome(deadline=None):
+            self.assertIsNotNone(deadline)
+            bc._linux_keyring_password("chrome", deadline)
+            return None
+
+        with mock.patch.dict(bc._LINUX_SECRET_LOOKUPS,
+                             {"chrome": (("application", "chrome"), ("xdg:schema", "x"))}), \
+                mock.patch.object(grok, "urlopen_no_redirect", _slow_cli), \
+                mock.patch.object(grok, "_SESSION_PATH", os.path.join(self.tmp, "none.json")), \
+                mock.patch.object(grok, "load_firefox_grok_cookies", return_value=None), \
+                mock.patch.object(grok, "load_chrome_grok_cookies", _chrome), \
+                mock.patch.object(bc.shutil, "which", return_value="/usr/bin/secret-tool"), \
+                mock.patch.object(bc.subprocess, "run", _run):
+            res = grok.fetch_grok_quota(deadline)
+        self.assertEqual(timeouts, [3.0])
+        self.assertEqual(res.unavailable_reason, "http-500")
+        self.assertLessEqual(now[0], grok._FETCH_BUDGET_S)
+
+    def test_null_issuer_is_rejected(self):
+        _write_auth(self.tmp, {PUBLIC: {"key": "K", "expires_at": "2999-01-01T00:00:00Z",
+                                        "oidc_issuer": None}})
+        self.assertEqual(grok._load_grok_cli_token(), (None, "no-credentials"))
+
+    def test_cookie_timeout_keeps_cli_reason(self):
+        _auth(self.tmp, "2999-01-01T00:00:00Z")
+        def _fail(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 500, "x", {}, None)
+        with mock.patch.object(grok, "urlopen_no_redirect", _fail), \
+                mock.patch.object(grok, "_load_cookies",
+                                  side_effect=grok.ChromeCookieError("timeout")):
+            self.assertEqual(grok.fetch_grok_quota().unavailable_reason, "http-500")
+
     def test_registry_gate_blocks_cli_when_disabled(self):
         _auth(self.tmp, "2999-01-01T00:00:00Z")
         with mock.patch.dict(os.environ, {"HERMES_QUOTA_GROK_ENABLED": "0"}), \
