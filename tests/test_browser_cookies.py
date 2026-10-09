@@ -471,6 +471,8 @@ class GrokChromeWireTests(unittest.TestCase):
         from quota_providers.browser_cookies import ChromeCookieError
 
         with mock.patch.object(grok, "_SESSION_PATH", "/tmp/missing-grok-session.json"), mock.patch.object(
+            grok, "_fetch_grok_cli", return_value=None
+        ), mock.patch.object(
             grok, "load_firefox_grok_cookies", return_value=None
         ), mock.patch.object(
             grok,
