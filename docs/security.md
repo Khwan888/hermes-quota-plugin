@@ -2,6 +2,10 @@
 
 - No telemetry. Cookies and tokens are never printed.
 - Grok cookies are used only for the Grok billing request, and only when you opt in.
+- Grok CLI login (`~/.grok/auth.json`), only with `grokEnabled`: the whole file is
+  parsed, but only the public xAI access-token field is used, sent only to
+  `cli-chat-proxy.grok.com/v1/billing`, and never cached or written back. The
+  plugin never sends or exchanges the refresh token and never starts the Grok CLI.
 - Chrome/Firefox cookie values are never printed, cached, or written back to disk.
 - Extra Claude accounts are opt-in and read-only: an access token is read from the
   listed `.credentials.json`, used for one usage request, and never cached,

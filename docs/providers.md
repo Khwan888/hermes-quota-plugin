@@ -17,7 +17,7 @@
 | `cursor` | `cursor-agent` login (macOS keychain or `auth.json`) | Read-only credential use; Included and API billing-cycle percents; personal on-demand cap as a window, personal/team pools as details. If the session expires, run `cursor-agent login`; the plugin never exchanges refresh tokens or writes to Cursor's credential store. |
 | `minimax` | Subscription Key **or** OAuth (`minimax-oauth`) | Token Plan 5h + Weekly windows per model; pay-as-you-go keys show `no-subscription`. The `video` model bucket is **opt-in** (default off — low tiers don't include video, so the entry reports a meaningless 100%). Enable with `hermes config set plugins.entries.quota.settings.minimaxVideoEnabled true` or `HERMES_QUOTA_MINIMAX_VIDEO_ENABLED=1`. |
 | `ollama` | `OLLAMA_API_KEY` (`sk-…`, from ollama.com/settings) | Ollama Cloud, from `GET /api/usage` (spend, per-model request counts) and `POST /api/me` (plan label, signup date). The **Monthly** bar is the server-reported usage fraction. The reset is the next monthly anniversary of `CreatedAt`, matching Ollama's documented "resets monthly on the same day of the month your plan started"; the day is derived because no endpoint returns a reset timestamp. **No balance value** — Ollama exposes none; see below. |
-| `grok` | browser cookies | **Opt-in**, disabled by default. The xAI API exposes no plan or account name, so the card shows neither. |
+| `grok` | Grok CLI login, else browser cookies | **Opt-in**, disabled by default. The xAI API exposes no plan or account name, so the card shows neither. |
 
 Each fetcher is **fail-open**: a broken provider shows `unavailable (<reason>)`
 and never blocks the rest.
@@ -156,15 +156,29 @@ With one key, the windows are labelled plainly (`5-hour`, `Weekly`, `Monthly`). 
 
 ### Grok (opt-in)
 
-Grok is the only provider read from your browser — there is no clean API path
-right now — so it is **disabled by default**:
+Grok reads the Grok CLI login first and falls back to browser cookies, so it is
+**disabled by default**:
 
 ```bash
 hermes config set plugins.entries.quota.settings.grokEnabled true
 hermes quota refresh
 ```
 
-When off, Grok reports `opt-in-disabled`: no cookies are read, no files written.
+When off, Grok reports `opt-in-disabled`: no credentials are read, no files written.
+
+**Grok CLI login (preferred, works headless).** If you ran `grok login`, the
+plugin parses `$GROK_HOME/auth.json` (default `~/.grok/auth.json`) and uses only
+the access-token field of the public xAI login (issuer `https://auth.x.ai`);
+enterprise / custom-IdP scopes in the same file are skipped. The token is sent
+only to `https://cli-chat-proxy.grok.com/v1/billing?format=credits`, the
+endpoint the CLI uses for its own usage view (undocumented, so it may change).
+The card shows the weekly credit meter and the per-product legend
+(e.g. `Grok Build`). The plugin never sends the refresh token and never writes
+`auth.json`. An expired access token (the CLI rotates it about every 6 hours)
+reports `reauth-required`; running any `grok` command refreshes it, and the
+plugin never refreshes it itself.
+
+If there is no CLI login, or the CLI request fails, the browser cookie path runs.
 Cookie sources, in order:
 
 1. `~/grok_session.json` if you created one yourself
