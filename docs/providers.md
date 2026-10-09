@@ -174,9 +174,10 @@ only to `https://cli-chat-proxy.grok.com/v1/billing?format=credits`, the
 endpoint the CLI uses for its own usage view (undocumented, so it may change).
 The card shows the weekly credit meter and the per-product legend
 (e.g. `Grok Build`). The plugin never sends the refresh token and never writes
-`auth.json`. An expired access token (the CLI rotates it about every 6 hours)
-reports `reauth-required`; running any `grok` command refreshes it, and the
-plugin never refreshes it itself.
+`auth.json`. The access token is short-lived; when it has expired the plugin
+does not renew it. The card then shows `reauth-required` unless the browser
+cookie fallback succeeds. Running the Grok CLI usually renews the token; if it
+does not, run `grok login`.
 
 If there is no CLI login, or the CLI request fails, the browser cookie path runs.
 Cookie sources, in order:

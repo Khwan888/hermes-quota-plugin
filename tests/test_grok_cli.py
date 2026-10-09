@@ -73,7 +73,15 @@ class ParseTests(unittest.TestCase):
             with self.subTest(cfg=cfg):
                 self.assertIsNone(grok._parse_cli_billing({"config": cfg}))
         res = grok._parse_cli_billing({"config": {"onDemandCap": {"val": 5}, "onDemandUsed": {"val": "x"}}})
+        self.assertEqual(res.details, ["On-demand cap: 5"])
+        res = grok._parse_cli_billing({"config": {"onDemandCap": {"val": 5}, "onDemandUsed": {"val": 0}}})
         self.assertEqual(res.details, ["On-demand: 0 / 5"])
+
+    def test_huge_and_nonfinite_numbers_are_unknown(self):
+        for raw in ('{"config":{"creditUsagePercent":%s}}' % ("9" * 400),
+                    '{"config":{"creditUsagePercent":1e309}}'):
+            with self.subTest(raw=raw[:40]):
+                self.assertIsNone(grok._parse_cli_billing(json.loads(raw)))
 
     def test_absent_percent_is_not_reported_as_zero(self):
         cfg = {"currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "end": "2026-10-12T06:11:07Z"}}
@@ -93,7 +101,7 @@ class ExpiryTests(unittest.TestCase):
                 self.assertEqual(grok._parse_expiry(raw), want)
 
     def test_unparseable_is_none(self):
-        for raw in (None, "", "soon", 123):
+        for raw in (None, "", "soon", 123, "9999-12-31T23:59:59-05:00", "0001-01-01T00:00:00+05:00"):
             self.assertIsNone(grok._parse_expiry(raw))
 
 
@@ -109,6 +117,14 @@ class TokenTests(_Env):
     def test_only_enterprise_scope_means_no_credentials(self):
         _auth(self.tmp, "2999-01-01T00:00:00Z", scope="https://idp.example.com::c",
               issuer="https://idp.example.com")
+        self.assertEqual(grok._load_grok_cli_token(), (None, "no-credentials"))
+
+    def test_issuer_and_scope_must_agree(self):
+        _write_auth(self.tmp, {
+            PUBLIC: {"key": "LIAR", "expires_at": "2999-01-01T00:00:00Z", "oidc_issuer": "https://idp.example.com"},
+            "https://idp.example.com::c": {"key": "LIAR2", "expires_at": "2999-01-01T00:00:00Z",
+                                           "oidc_issuer": "https://auth.x.ai"},
+        })
         self.assertEqual(grok._load_grok_cli_token(), (None, "no-credentials"))
 
     def test_missing_expiry_is_tried(self):
@@ -171,6 +187,26 @@ class FetchTests(_Env):
                 mock.patch.object(grok, "_load_cookies", return_value=None):
             res = grok.fetch_grok_quota(deadline)
         self.assertEqual(res.unavailable_reason, "timeout")
+
+    def test_spent_budget_skips_cookie_acquisition(self):
+        _auth(self.tmp, "2999-01-01T00:00:00Z")
+        ticks = iter([0.0, 0.0] + [100.0] * 50)
+        deadline = Deadline(grok._FETCH_BUDGET_S, clock=lambda: next(ticks))
+
+        def _slow_fail(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 500, "x", {}, None)
+        with mock.patch.object(grok, "urlopen_no_redirect", _slow_fail), \
+                mock.patch.object(grok, "_load_cookies", side_effect=AssertionError("cookies read")):
+            self.assertEqual(grok.fetch_grok_quota(deadline).unavailable_reason, "http-500")
+
+    def test_cli_failure_falls_back_to_cookies(self):
+        _auth(self.tmp, "2000-01-01T00:00:00Z")
+        ok = grok.QuotaResult(label="grok", windows=[], details=["cookie"], unavailable_reason=None)
+        with mock.patch.object(grok, "_load_cookies", return_value="c=1"), \
+                mock.patch.object(grok, "urlopen_no_redirect", _ok(b"")), \
+                mock.patch.object(grok, "_parse_grok_protobuf", return_value=ok):
+            res = grok.fetch_grok_quota()
+        self.assertEqual((res.unavailable_reason, res.details), (None, ["cookie"]))
 
     def test_registry_gate_blocks_cli_when_disabled(self):
         _auth(self.tmp, "2999-01-01T00:00:00Z")

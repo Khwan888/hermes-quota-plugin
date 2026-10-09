@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import tempfile
@@ -294,18 +295,22 @@ def _parse_expiry(value: object) -> Optional[datetime]:
     text = head + (f".{frac[:6].ljust(6, '0')}" if frac else "") + (off or "+00:00")
     try:
         when = datetime.fromisoformat(text)
-    except ValueError:
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return when.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return when.astimezone(timezone.utc)
 
 
 def _is_public_scope(scope: object, entry: dict) -> bool:
+    """Public xAI login only: the scope key must name auth.x.ai, and an
+    issuer field, when present, must agree with it."""
+    if not (isinstance(scope, str) and scope.startswith(_CLI_PUBLIC_ISSUER + "::")):
+        return False
     issuer = entry.get("oidc_issuer")
-    if isinstance(issuer, str) and issuer.strip():
-        return issuer.strip().rstrip("/") == _CLI_PUBLIC_ISSUER
-    return isinstance(scope, str) and scope.startswith(_CLI_PUBLIC_ISSUER + "::")
+    if issuer is None:
+        return True
+    return isinstance(issuer, str) and issuer.strip().rstrip("/") == _CLI_PUBLIC_ISSUER
 
 
 def _load_grok_cli_token() -> tuple[Optional[str], Optional[str]]:
@@ -342,7 +347,11 @@ def _load_grok_cli_token() -> tuple[Optional[str], Optional[str]]:
 def _num(value: object) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    try:
+        out = float(value)
+    except OverflowError:
+        return None
+    return out if math.isfinite(out) else None
 
 
 def _parse_cli_billing(data: object) -> Optional[QuotaResult]:
@@ -389,7 +398,8 @@ def _parse_cli_billing(data: object) -> Optional[QuotaResult]:
 
     cap = _val("onDemandCap")
     if cap is not None and cap > 0:
-        details.append(f"On-demand: {_val('onDemandUsed') or 0:g} / {cap:g}")
+        used = _val("onDemandUsed")
+        details.append(f"On-demand: {used:g} / {cap:g}" if used is not None else f"On-demand cap: {cap:g}")
     bal = _val("prepaidBalance")
     if bal is not None and bal > 0:
         details.append(f"Prepaid balance: {bal:g}")
@@ -427,7 +437,11 @@ def _fetch_grok_cli(deadline: Deadline) -> Optional[QuotaResult]:
         data = json.loads(raw)
     except ValueError:
         return build_unavailable("grok", "bad-json")
-    return _parse_cli_billing(data) or build_unavailable("grok", "parse-pending")
+    try:
+        parsed = _parse_cli_billing(data)
+    except Exception:
+        parsed = None
+    return parsed or build_unavailable("grok", "parse-pending")
 
 
 def fetch_grok_quota(deadline: Optional[Deadline] = None) -> QuotaResult:
@@ -435,6 +449,8 @@ def fetch_grok_quota(deadline: Optional[Deadline] = None) -> QuotaResult:
     cli = _fetch_grok_cli(deadline)
     if cli is not None and cli.unavailable_reason is None:
         return cli
+    if deadline.remaining() <= 0:
+        return cli if cli is not None else build_unavailable("grok", "timeout")
     try:
         cookies = _load_cookies()
     except ChromeCookieError as exc:
